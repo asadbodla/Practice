@@ -44,15 +44,35 @@ public class MainActivity extends Activity {
         prefs = getSharedPreferences("aq", MODE_PRIVATE);
         installCrashLogger();
 
+        // If the previous run was still marked "running", it died without closing normally (even a native crash).
+        String failNote = null;
+        if (prefs.getBoolean("running", false)) {
+            int lvl = Math.min(prefs.getInt("level", 0) + 1, 3);
+            prefs.edit().putInt("level", lvl).commit();
+            failNote = "Last time the app closed at this step:\n  " + prefs.getString("stage", "?")
+                    + "\n\nNow trying simpler graphics: level " + lvl + " of 3."
+                    + "\n\nDevice: " + deviceInfo();
+        }
+        mark("App starting");
+        prefs.edit().putBoolean("running", true).commit();
+
+        mark("Creating web view");
         web = buildWebView();
         setContentView(web);
-        web.loadUrl(START + (prefs.getInt("rendererCrashes", 0) >= 2 ? "?safe=1" : ""));
+        mark("Loading page");
+        web.loadUrl(START + "?gfx=" + prefs.getInt("level", 0));
 
-        showLastCrashIfAny();
+        showLastCrashIfAny(failNote);
+    }
 
+    private void mark(String stage) { prefs.edit().putString("stage", stage).commit(); }
+
+    private void initTtsNow() {
+        if (tts != null) return;
+        mark("Starting voice engine");
         try {
             tts = new TextToSpeech(this, status -> {
-                if (status != TextToSpeech.SUCCESS) return;
+                if (status != TextToSpeech.SUCCESS) { mark("Voice engine not available"); return; }
                 try {
                     int r = tts.setLanguage(Locale.UK);
                     if (r == TextToSpeech.LANG_MISSING_DATA || r == TextToSpeech.LANG_NOT_SUPPORTED) r = tts.setLanguage(Locale.US);
@@ -63,6 +83,7 @@ public class MainActivity extends Activity {
                         @Override public void onError(String id) { notifyDone(id); }
                     });
                     ttsReady = true;
+                    mark("Voice engine started");
                 } catch (Throwable t) { Log.w("AtlasQuest", "TTS setup failed", t); }
             });
         } catch (Throwable t) { Log.w("AtlasQuest", "TTS unavailable", t); }
@@ -105,23 +126,17 @@ public class MainActivity extends Activity {
             }
 
             @Override
-            public void onPageFinished(WebView view, String url) {
-                // Page loaded OK: after a while, reset the crash counter so safe mode is only used when needed.
-                view.postDelayed(() -> prefs.edit().putInt("rendererCrashes", 0).apply(), 20000);
-            }
-
-            @Override
             public boolean onRenderProcessGone(WebView view, RenderProcessGoneDetail detail) {
-                int n = prefs.getInt("rendererCrashes", 0) + 1;
-                prefs.edit().putInt("rendererCrashes", n)
-                        .putString("lastCrash", "The game's display stopped (" + (detail.didCrash() ? "crashed" : "closed by Android to free memory") + "), time " + n + ".\nDevice: " + deviceInfo()).apply();
+                int lvl = Math.min(prefs.getInt("level", 0) + 1, 3);
+                prefs.edit().putInt("level", lvl).putString("lastCrash", "The game's display stopped (" + (detail.didCrash() ? "crashed" : "closed by Android to free memory")
+                        + ") at step: " + prefs.getString("stage", "?") + "\nNow using simpler graphics: level " + lvl + " of 3.\nDevice: " + deviceInfo()).commit();
                 if (view == web) {
                     ViewGroup parent = (ViewGroup) view.getParent();
                     if (parent != null) parent.removeView(view);
                     view.destroy();
                     web = buildWebView();
                     setContentView(web);
-                    web.loadUrl(START + (n >= 2 ? "?safe=1" : ""));
+                    web.loadUrl(START + "?gfx=" + lvl);
                 }
                 return true;
             }
@@ -161,8 +176,9 @@ public class MainActivity extends Activity {
         });
     }
 
-    private void showLastCrashIfAny() {
+    private void showLastCrashIfAny(String failNote) {
         String msg = prefs.getString("lastCrash", null);
+        if (failNote != null) msg = failNote;
         File f = new File(getFilesDir(), "crash.txt");
         try {
             if (f.exists()) {
@@ -199,10 +215,14 @@ public class MainActivity extends Activity {
             tts.speak(text, TextToSpeech.QUEUE_FLUSH, null, id);
         }
         @JavascriptInterface public void stop() { if (ttsReady) tts.stop(); }
+        @JavascriptInterface public void stage(String s) { mark(s == null ? "?" : (s.length() > 120 ? s.substring(0, 120) : s)); }
+        @JavascriptInterface public void setLevel(int l) { prefs.edit().putInt("level", Math.max(0, Math.min(3, l))).commit(); }
+        @JavascriptInterface public int level() { return prefs.getInt("level", 0); }
+        @JavascriptInterface public void initTts() { runOnUiThread(MainActivity.this::initTtsNow); }
     }
 
     @Override public void onBackPressed() { if (web != null && web.canGoBack()) web.goBack(); else super.onBackPressed(); }
-    @Override protected void onPause() { super.onPause(); if (ttsReady) tts.stop(); if (web != null) web.onPause(); }
-    @Override protected void onResume() { super.onResume(); if (web != null) web.onResume(); }
+    @Override protected void onPause() { super.onPause(); prefs.edit().putBoolean("running", false).commit(); if (ttsReady) tts.stop(); if (web != null) web.onPause(); }
+    @Override protected void onResume() { super.onResume(); prefs.edit().putBoolean("running", true).commit(); if (web != null) web.onResume(); }
     @Override protected void onDestroy() { if (tts != null) tts.shutdown(); if (web != null) web.destroy(); web = null; super.onDestroy(); }
 }
