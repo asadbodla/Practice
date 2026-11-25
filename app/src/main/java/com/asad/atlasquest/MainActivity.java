@@ -43,16 +43,30 @@ public class MainActivity extends Activity {
         super.onCreate(savedInstanceState);
         prefs = getSharedPreferences("aq", MODE_PRIVATE);
         installCrashLogger();
+        // New version: start again from full graphics, since earlier crashes may have been caused by the voice engine.
+        if (prefs.getInt("appVersion", 0) != 5) prefs.edit().putInt("appVersion", 5).putInt("level", 0).putBoolean("running", false).commit();
 
         // If the previous run was still marked "running", it died without closing normally (even a native crash).
         String failNote = null;
         if (prefs.getBoolean("running", false)) {
-            int lvl = Math.min(prefs.getInt("level", 0) + 1, 3);
-            prefs.edit().putInt("level", lvl).commit();
-            failNote = "Last time the app closed at this step:\n  " + prefs.getString("stage", "?")
-                    + "\n\nNow trying simpler graphics: level " + lvl + " of 3."
+            String last = prefs.getString("stage", "?");
+            String voice = prefs.getString("tts", "not started");
+            String action;
+            if (voice.startsWith("starting") || voice.startsWith("speaking")) {
+                // The crash happened while the phone's voice engine was starting or speaking: turn the voice off.
+                prefs.edit().putBoolean("ttsDisabled", true).commit();
+                action = "The phone's voice engine looks like the cause, so the narrator voice is now OFF (stories show as text). Graphics are unchanged.";
+            } else {
+                int lvl = Math.min(prefs.getInt("level", 0) + 1, 3);
+                prefs.edit().putInt("level", lvl).commit();
+                action = "Now trying simpler graphics: level " + lvl + " of 3.";
+            }
+            failNote = "Last time the app closed at this step:\n  " + last
+                    + "\nVoice engine: " + voice
+                    + "\n\n" + action
                     + "\n\nDevice: " + deviceInfo();
         }
+        prefs.edit().putString("tts", "not started").commit();
         mark("App starting");
         prefs.edit().putBoolean("running", true).commit();
 
@@ -67,26 +81,28 @@ public class MainActivity extends Activity {
 
     private void mark(String stage) { prefs.edit().putString("stage", stage).commit(); }
 
+    private void voice(String state) { prefs.edit().putString("tts", state).commit(); }
+
     private void initTtsNow() {
-        if (tts != null) return;
-        mark("Starting voice engine");
+        if (tts != null || prefs.getBoolean("ttsDisabled", false)) return;
+        voice("starting");
         try {
             tts = new TextToSpeech(this, status -> {
-                if (status != TextToSpeech.SUCCESS) { mark("Voice engine not available"); return; }
+                if (status != TextToSpeech.SUCCESS) { voice("not available"); return; }
                 try {
                     int r = tts.setLanguage(Locale.UK);
                     if (r == TextToSpeech.LANG_MISSING_DATA || r == TextToSpeech.LANG_NOT_SUPPORTED) r = tts.setLanguage(Locale.US);
                     if (r == TextToSpeech.LANG_MISSING_DATA || r == TextToSpeech.LANG_NOT_SUPPORTED) tts.setLanguage(Locale.ENGLISH);
                     tts.setOnUtteranceProgressListener(new UtteranceProgressListener() {
                         @Override public void onStart(String id) { }
-                        @Override public void onDone(String id) { notifyDone(id); }
+                        @Override public void onDone(String id) { voice("ready"); notifyDone(id); }
                         @Override public void onError(String id) { notifyDone(id); }
                     });
                     ttsReady = true;
-                    mark("Voice engine started");
-                } catch (Throwable t) { Log.w("AtlasQuest", "TTS setup failed", t); }
+                    voice("ready");
+                } catch (Throwable t) { voice("failed to set up"); Log.w("AtlasQuest", "TTS setup failed", t); }
             });
-        } catch (Throwable t) { Log.w("AtlasQuest", "TTS unavailable", t); }
+        } catch (Throwable t) { voice("unavailable"); Log.w("AtlasQuest", "TTS unavailable", t); }
     }
 
     // ---------- WebView ----------
@@ -211,6 +227,7 @@ public class MainActivity extends Activity {
         @JavascriptInterface public boolean ready() { return ttsReady; }
         @JavascriptInterface public void speak(String text, float rate, String id) {
             if (!ttsReady) { notifyDone(id); return; }
+            voice("speaking");
             tts.setSpeechRate(rate);
             tts.speak(text, TextToSpeech.QUEUE_FLUSH, null, id);
         }
@@ -219,6 +236,8 @@ public class MainActivity extends Activity {
         @JavascriptInterface public void setLevel(int l) { prefs.edit().putInt("level", Math.max(0, Math.min(3, l))).commit(); }
         @JavascriptInterface public int level() { return prefs.getInt("level", 0); }
         @JavascriptInterface public void initTts() { runOnUiThread(MainActivity.this::initTtsNow); }
+        @JavascriptInterface public boolean disabled() { return prefs.getBoolean("ttsDisabled", false); }
+        @JavascriptInterface public void enableVoice() { prefs.edit().putBoolean("ttsDisabled", false).commit(); }
     }
 
     @Override public void onBackPressed() { if (web != null && web.canGoBack()) web.goBack(); else super.onBackPressed(); }
